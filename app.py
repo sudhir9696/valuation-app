@@ -9,20 +9,21 @@ st.set_page_config(page_title="Swathi's Market Intelligence", layout="wide")
 st.title("🏡 Swathi's Real Estate Valuation Dashboard")
 
 # --- SECURE KEYS ---
-# Pulling from Streamlit Cloud "Advanced Settings" > Secrets
+# These pull from Streamlit Cloud "Advanced Settings" > Secrets
 RENT_KEY = st.secrets["RENTCAST_API_KEY"]
 AI_KEY = st.secrets["CLAUDE_API_KEY"]
 
 # --- SIDEBAR: USER INPUTS ---
 with st.sidebar:
     st.header("Property Config")
-    address = st.text_input("Street Address", value="6089 Grand Loop Rd")
-    city = st.text_input("City, State", value="Sugar Hill, GA")
-    zip_code = st.text_input("Zip Code", value="30518")
+    address = st.text_input("Street Address", value="2275 Lake Cove Ct")
+    city = st.text_input("City, State", value="Buford, GA")
+    zip_code = st.text_input("Zip Code", value="30519")
     
     st.divider()
     st.header("Search Parameters")
-    search_radius = st.slider("Search Radius (Miles)", 0.1, 5.0, 1.5, 0.1)
+    # Increased default radius to 2.0 to ensure comps are found in suburban areas
+    search_radius = st.slider("Search Radius (Miles)", 0.1, 5.0, 2.0, 0.1)
     exclude_addr = st.text_input("Exclude Address?", placeholder="e.g., 4718")
     
     st.divider()
@@ -32,26 +33,25 @@ with st.sidebar:
     
     run_btn = st.button("Generate Valuation Report", type="primary")
 
-# --- DATA FETCHING (The "Soft Filter" Logic) ---
+# --- DATA FETCHING (Wide Net Strategy) ---
 @st.cache_data(ttl=3600)
 def get_market_data(addr, cty, zp, radius):
     headers = {"X-Api-Key": RENT_KEY, "Accept": "application/json"}
     full_addr = f"{addr}, {cty}, {zp}"
     
-    # 1. Fetch Subject Property Details (The "Source of Truth")
+    # 1. Fetch Subject Property Details
     prop_url = "https://api.rentcast.io/v1/properties"
     prop_params = {"address": full_addr}
     prop_res = requests.get(prop_url, headers=headers, params=prop_params).json()
     subject_details = prop_res[0] if isinstance(prop_res, list) and len(prop_res) > 0 else {}
     
-    # 2. Fetch Valuation & Comps (The "Wide Net")
-    # We do NOT filter for beds/basement here so we always get results
+    # 2. Fetch Valuation & ALL Comps (No restrictive filters)
     avm_url = "https://api.rentcast.io/v1/avm/value"
     avm_params = {
         "address": full_addr,
         "propertyType": "Single Family",
         "radius": radius,
-        "compCount": 25
+        "compCount": 25 # Maximize the sample size
     }
     avm_res = requests.get(avm_url, headers=headers, params=avm_params).json()
     
@@ -59,29 +59,26 @@ def get_market_data(addr, cty, zp, radius):
 
 # --- MAIN PAGE: DATA DISPLAY ---
 if run_btn:
-    with st.spinner("Analyzing Market Data..."):
+    with st.spinner("Locking on to market data..."):
         avm_data, prop_info = get_market_data(address, city, zip_code, search_radius)
         
-        # ✅ DATA EXTRACTION (Priority to prop_info)
+        # Data extraction with fallback paths
         subject_beds = prop_info.get('bedrooms') or avm_data.get('bedrooms') or 0
         subject_tax = prop_info.get('taxAmt') or avm_data.get('taxAmt') or 0
         
-        # Basement Check
         b_type = prop_info.get('basementType') or avm_data.get('basementType') or ""
         subject_basement = "Yes" if b_type and str(b_type).lower() != "none" else "No"
         
-        # Metrics Display
+        # Metrics Row
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Subject Beds", subject_beds)
         col2.metric("Annual Tax", f"${subject_tax:,.0f}" if subject_tax else "N/A")
         col3.metric("Basement", subject_basement)
         col4.metric("Market Adj", f"{mkt_adj*100}%")
 
-        # Table Display
-        st.subheader("📍 Detailed Comparable Sales (Filtered)")
+        # Comparable Sales Table
+        st.subheader("📍 Detailed Comparable Sales")
         all_comps = avm_data.get('comparables', [])
-        
-        # Apply exclusions if provided
         sold_comps = [c for c in all_comps if exclude_addr.lower() not in c.get('formattedAddress', '').lower()]
         
         if sold_comps:
@@ -101,13 +98,14 @@ if run_btn:
             df_disp = df.copy()
             df_disp['Price'] = df_disp['Price'].map('${:,.0f}'.format)
             
-            # ✅ STYLING: Highlight Same Bedrooms in Green
-            def highlight_beds(val):
+            # Styling: Highlight matching bedrooms in Dark Green
+            def highlight_match(val):
                 return 'background-color: #1e4620; color: white;' if val == subject_beds else ''
             
-            st.dataframe(df_disp.style.applymap(highlight_beds, subset=['Beds']), width='stretch')
+            # Use width='stretch' to comply with 2026 Streamlit standards
+            st.dataframe(df_disp.style.applymap(highlight_match, subset=['Beds']), width='stretch')
         else:
-            st.warning("No comps found. Try increasing the search radius in the sidebar.")
+            st.warning("No nearby sales found. Try increasing the search radius.")
 
         # AI Analysis
         st.subheader("🧠 Strategic AI Analysis")
@@ -115,19 +113,19 @@ if run_btn:
         
         prompt = f"""
         Subject Property: {address}. 
-        Subject Details: {subject_beds} Bedrooms, Basement: {subject_basement}.
-        Market Adjustment: {mkt_adj*100}%. Condition: {cond_score}/5.
+        Criteria: {subject_beds} Beds, Basement: {subject_basement}.
+        Market Adjustment: {mkt_adj*100}%. Condition Score: {cond_score}/5.
         
-        COMPARABLE DATA (JSON): {json.dumps(sold_comps)}
+        DATA: {json.dumps(sold_comps)}
         
-        ANALYSIS RULES:
-        1. PRIORITIZE matches with exactly {subject_beds} bedrooms.
-        2. BASEMENT ADJUSTMENT: If subject has a basement but comp doesn't, add value.
-        3. OUTPUT: Provide a Suggested 'Strike Price', 'Floor Offer', and 3 detailed rationale points.
-        4. FORMATTING: Use ### Headers and ensure spaces around **bold** prices.
+        INSTRUCTIONS:
+        1. PRIORITIZE the matches with exactly {subject_beds} bedrooms.
+        2. adjust value for the subject's basement ({subject_basement}) vs the comps.
+        3. Suggest a 'Strike Price', 'Floor Offer', and 3-point rationale.
+        4. Use ### Headers and standard bolding (**price**).
         """
         
-        # ✅ Using your specified model name
+        # Updated to your specific model
         message = client.messages.create(
             model="claude-sonnet-4-6", 
             max_tokens=1024,

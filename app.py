@@ -8,8 +8,7 @@ import pandas as pd
 st.set_page_config(page_title="Swathi's Market Intelligence", layout="wide")
 st.title("🏡 Swathi's Real Estate Valuation Dashboard")
 
-# --- SECURE KEYS FROM STREAMLIT SECRETS ---
-# This ensures GitHub never sees your real keys
+# --- SECURE KEYS ---
 RENT_KEY = st.secrets["RENTCAST_API_KEY"]
 AI_KEY = st.secrets["CLAUDE_API_KEY"]
 
@@ -18,12 +17,11 @@ with st.sidebar:
     st.header("Property Config")
     address = st.text_input("Street Address", value="6089 Grand Loop Rd")
     city = st.text_input("City, State", value="Sugar Hill, GA")
-    tax_val = st.number_input("Tax Assessment ($)", value=302120)
     
     st.divider()
     st.header("Search Parameters")
     search_radius = st.slider("Search Radius (Miles)", 0.1, 5.0, 1.5, 0.1)
-    exclude_addr = st.text_input("Exclude Address?", value="", placeholder="e.g., 4718")
+    exclude_addr = st.text_input("Exclude Address?", placeholder="e.g., 4718")
     
     st.divider()
     st.header("Market Controls")
@@ -37,74 +35,84 @@ with st.sidebar:
 def get_valuation_data(radius_miles, addr, cty):
     headers = {"X-Api-Key": RENT_KEY, "Accept": "application/json"}
     url = "https://api.rentcast.io/v1/avm/value"
-    params = {"address": f"{addr}, {cty}", "propertyType": "Single Family", "radius": radius_miles, "compCount": 20, "daysOld": 365}
+    params = {
+        "address": f"{addr}, {cty}",
+        "propertyType": "Single Family",
+        "radius": radius_miles, 
+        "compCount": 25, # Higher count to allow for filtering
+        "daysOld": 365
+    }
     response = requests.get(url, headers=headers, params=params)
     return response.json()
 
-# --- MAIN PAGE: REPORTING ---
+# --- MAIN PAGE ---
 if run_btn:
-    with st.spinner("Analyzing Market Data via RentCast..."):
+    with st.spinner("Analyzing Market Data..."):
         data = get_valuation_data(search_radius, address, city)
+        
+        # 1. GET SUBJECT DETAILS (No more manual tax entry!)
+        subject = data # The AVM endpoint returns subject attributes automatically
+        subject_beds = subject.get('bedrooms', 0)
+        subject_tax = subject.get('taxAmt', 0)
+        subject_basement = "Yes" if subject.get('basementType') else "No"
+        
         all_comps = data.get('comparables', [])
         
-        # Generic Exclusion Filter
-        if exclude_addr:
-            sold_comps = [c for c in all_comps if exclude_addr.lower() not in c.get('formattedAddress', '').lower()]
-        else:
-            sold_comps = all_comps
+        # 2. FILTER: Exclude address + Strictly look at Same Bedrooms if possible
+        sold_comps = [c for c in all_comps if exclude_addr.lower() not in c.get('formattedAddress', '').lower()]
         
-        tax_baseline = tax_val / 0.4
+        # 3. DISPLAY METRICS
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Subject Beds", subject_beds)
+        col2.metric("Annual Tax", f"${subject_tax:,.0f}" if subject_tax else "N/A")
+        col3.metric("Basement", subject_basement)
+        col4.metric("Market Adj", f"{mkt_adj*100}%")
 
-        # Metrics
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Tax Baseline (FMV)", f"${tax_baseline:,.0f}")
-        col2.metric("Market Sentiment", "Buyer's Market" if mkt_adj < 0 else "Seller's Market")
-        col3.metric("Adjustment", f"{mkt_adj*100}%")
-
-        # Table Display
-        st.subheader("📍 Recent Comparable Sales")
-        if sold_comps:
-            comp_data = []
-            for c in sold_comps:
-                p, s = c.get('price', 0), c.get('squareFootage', 1)
-                comp_data.append({
-                    "Address": c.get('formattedAddress'),
-                    "Sold Date": c.get('lastSeenDate', "")[:10],
-                    "Price": p,
-                    "$/SqFt": round(p/s, 2) if s > 0 else 0,
-                    "Dist (Mi)": round(c.get('distance', 0), 2)
-                })
-            df = pd.DataFrame(comp_data)
+        # 4. TABLE: Include Basement & Bed Comparison
+        st.subheader("📍 Detailed Comparable Sales (Filtered)")
+        comp_list = []
+        for c in sold_comps:
+            p, s = c.get('price', 0), c.get('squareFootage', 1)
+            comp_list.append({
+                "Address": c.get('formattedAddress'),
+                "Beds": c.get('bedrooms'),
+                "Basement": "Yes" if c.get('basementType') else "No",
+                "Sold Date": c.get('lastSeenDate', "")[:10],
+                "Price": p,
+                "$/SqFt": round(p/s, 2) if s > 0 else 0,
+                "Dist": round(c.get('distance', 0), 2)
+            })
+        
+        if comp_list:
+            df = pd.DataFrame(comp_list)
+            # Apply color to help Swathi see same-bedroom matches
+            def highlight_beds(val):
+                return 'background-color: #2e7d32' if val == subject_beds else ''
+            
             df_disp = df.copy()
             df_disp['Price'] = df_disp['Price'].map('${:,.0f}'.format)
-            st.dataframe(df_disp, use_container_width=True)
-        else:
-            st.warning("No comps found.")
-
-        # AI Analysis with STRICT FORMATTING
+            st.dataframe(df_disp.style.applymap(highlight_beds, subset=['Beds']), use_container_width=True)
+        
+        # 5. AI ANALYSIS: Focused on Beds and Basement
         st.subheader("🧠 Strategic AI Analysis")
         client = anthropic.Anthropic(api_key=AI_KEY) 
         
         prompt = f"""
-        Subject: {address}. Tax Baseline: ${tax_baseline:,.0f}.
-        Market Adj: {mkt_adj*100}%. Condition: {cond_score}/5.
+        Subject: {address}. Beds: {subject_beds}. Basement: {subject_basement}.
+        Annual Tax: ${subject_tax}. Market Adj: {mkt_adj*100}%.
+        
         COMPS: {json.dumps(sold_comps)}
         
-        REQUIRED OUTPUT SECTIONS:
-        1. A suggested 'Strike Price' for listing.
-        2. What is the least a buyer can put an offer.
-        3. A 3-point rationale based on the current market sentiment.
-
-        STRICT FORMATTING RULES:
-        4. Use standard Markdown headers (###) for sections.
-        5. Use bullet points for the rationale.
-        6. IMPORTANT: Ensure there is a space before and after every asterisk (*) and bold marker (**).
-        7. Do not combine numbers and text without spaces (e.g., use "$530,000" instead of "$530K").
+        STRATEGIC INSTRUCTIONS:
+        1. PRIORITIZE: Give 2x weight to comps with exactly {subject_beds} bedrooms.
+        2. BASEMENT VALUE: Compare the subject's basement ({subject_basement}) against the comps. 
+           If the subject has a basement but a comp doesn't, justify a higher price.
+        3. OUTPUT: Provide a 'Strike Price', 'Floor Offer', and 3-point rationale.
+        4. FORMATTING: Use ### Headers and ensure spaces around **bold** text.
         """
         
-        # ✅ FIXED: Uses 'latest' to avoid the 404 error from your screenshot
         message = client.messages.create(
-            model="claude-sonnet-4-6", 
+            model="claude-3-5-sonnet-latest", 
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}]
         )

@@ -9,7 +9,6 @@ st.set_page_config(page_title="Swathi's Market Intelligence", layout="wide")
 st.title("🏡 Swathi's Real Estate Valuation Dashboard")
 
 # --- SECURE KEYS FROM STREAMLIT SECRETS ---
-# This ensures GitHub never sees your real keys
 RENT_KEY = st.secrets["RENTCAST_API_KEY"]
 AI_KEY = st.secrets["CLAUDE_API_KEY"]
 
@@ -37,7 +36,13 @@ with st.sidebar:
 def get_valuation_data(radius_miles, addr, cty):
     headers = {"X-Api-Key": RENT_KEY, "Accept": "application/json"}
     url = "https://api.rentcast.io/v1/avm/value"
-    params = {"address": f"{addr}, {cty}", "propertyType": "Single Family", "radius": radius_miles, "compCount": 20, "daysOld": 365}
+    params = {
+        "address": f"{addr}, {cty}", 
+        "propertyType": "Single Family", 
+        "radius": radius_miles, 
+        "compCount": 25, 
+        "daysOld": 365
+    }
     response = requests.get(url, headers=headers, params=params)
     return response.json()
 
@@ -67,17 +72,30 @@ if run_btn:
             comp_data = []
             for c in sold_comps:
                 p, s = c.get('price', 0), c.get('squareFootage', 1)
+                
+                # Check for basement - Y if any basement type exists, otherwise N
+                has_basement = "Y" if c.get('basementType') and str(c.get('basementType')).lower() != 'none' else "N"
+                
                 comp_data.append({
                     "Address": c.get('formattedAddress'),
                     "Sold Date": c.get('lastSeenDate', "")[:10],
+                    "Beds": c.get('bedrooms', 0),
+                    "Baths": c.get('bathrooms', 0),
+                    "Basement": has_basement,
                     "Price": p,
                     "$/SqFt": round(p/s, 2) if s > 0 else 0,
                     "Dist (Mi)": round(c.get('distance', 0), 2)
                 })
+            
+            # Convert to DataFrame and sort by Sold Date (Descending)
             df = pd.DataFrame(comp_data)
+            df = df.sort_values(by="Sold Date", ascending=False)
+            
             df_disp = df.copy()
             df_disp['Price'] = df_disp['Price'].map('${:,.0f}'.format)
-            st.dataframe(df_disp, use_container_width=True)
+            
+            # Displaying with full container width
+            st.dataframe(df_disp, use_container_width=True, hide_index=True)
         else:
             st.warning("No comps found.")
 
@@ -86,14 +104,15 @@ if run_btn:
         client = anthropic.Anthropic(api_key=AI_KEY) 
         
         prompt = f"""
-        Subject: {address}. Tax Baseline: ${tax_baseline:,.0f}.
-        Market Adj: {mkt_adj*100}%. Condition: {cond_score}/5.
-        COMPS: {json.dumps(sold_comps)}
+        Subject Property: {address}. Tax Baseline: ${tax_baseline:,.0f}.
+        Market Adjustment: {mkt_adj*100}%. Condition: {cond_score}/5.
+        
+        COMPS DATA: {json.dumps(sold_comps)}
         
         REQUIRED OUTPUT SECTIONS:
         1. A suggested 'Strike Price' for listing.
         2. What is the least a buyer can put an offer.
-        3. A 3-point rationale based on the current market sentiment.
+        3. A 3-point rationale comparing subject features (Beds/Baths/Basement) to these comps.
 
         STRICT FORMATTING RULES:
         4. Use standard Markdown headers (###) for sections.
@@ -102,7 +121,6 @@ if run_btn:
         7. Do not combine numbers and text without spaces (e.g., use "$530,000" instead of "$530K").
         """
         
-        # ✅ FIXED: Uses 'latest' to avoid the 404 error from your screenshot
         message = client.messages.create(
             model="claude-sonnet-4-6", 
             max_tokens=1024,
